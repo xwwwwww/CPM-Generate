@@ -25,6 +25,8 @@ from io import open
 import sentencepiece as spm
 import jieba
 
+jieba.dt.tmp_dir = '/home/wenjiaxin/.jieba'
+
 try:
     from functools import lru_cache
 except ImportError:

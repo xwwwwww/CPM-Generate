@@ -273,6 +273,7 @@ def load_checkpoint_model(model, args):
         return 0
         
     # Checkpoint.
+    print('args.load = ', args.load)
     checkpoint_name = get_checkpoint_name(args.load, iteration, release)
     
     if mpu.get_data_parallel_rank() == 0:
