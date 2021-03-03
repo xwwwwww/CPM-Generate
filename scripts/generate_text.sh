@@ -8,10 +8,10 @@ NATT=32
 MAXSEQLEN=1024
 
 #SAMPLING ARGS
-TEMP=0.9
+TEMP=1
 #If TOPK/TOPP are 0 it defaults to greedy sampling, top-k will also override top-p
 TOPK=0
-TOPP=0
+TOPP=0.9
 
 CMD="python -m torch.distributed.launch --nproc_per_node 2 generate_samples.py \
        --model-parallel-size $MPSIZE \
