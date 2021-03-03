@@ -170,111 +170,121 @@ def generate_samples(model, tokenizer, args, device, context):
     context_count=0
     model.eval()
     with torch.no_grad():
-        while True:
-            torch.distributed.barrier(group=mpu.get_model_parallel_group())
-            terminate_runs=0
+        # while True:
+        torch.distributed.barrier(group=mpu.get_model_parallel_group())
+        terminate_runs=0
 
-            if mpu.get_model_parallel_rank() == 0:
-                raw_text = context
-                # if args.input_text:
-                #     raw_text = open(args.input_text).read().strip()
-                # else:
-                #     raw_text = input("\nContext prompt (stop to exit) >>> ")
-                #     while not raw_text:
-                #         print('Prompt should not be empty!')
-                #         raw_text = input("\nContext prompt (stop to exit) >>> ")
-           
-                if "stop" in raw_text:
-                    terminate_runs = 1
-                else:
-                    #context_tokens = tokenizer.EncodeAsIds(raw_text).tokenization
-                    context_tokens = tokenizer.encode(raw_text)
-                    context_length = len(context_tokens)
-                    
-                    if context_length >= args.seq_length//2: # FIXME: 需要截断
-                        print("\nContext length", context_length, \
-                            "\nPlease give smaller context (half of the sequence length)!")
-                        continue
+        if mpu.get_model_parallel_rank() == 0: # 默认只使用第一张卡
+            raw_text = context
+            # if args.input_text:
+            #     raw_text = open(args.input_text).read().strip()
+            # else:
+            #     raw_text = input("\nContext prompt (stop to exit) >>> ")
+            #     while not raw_text:
+            #         print('Prompt should not be empty!')
+            #         raw_text = input("\nContext prompt (stop to exit) >>> ")
+        
+            if "stop" in raw_text:
+                terminate_runs = 1
             else:
-                #context_tokens = tokenizer.EncodeAsIds("EMPTY TEXT").tokenization
-                context_tokens = tokenizer.encode("空文本")
+                #context_tokens = tokenizer.EncodeAsIds(raw_text).tokenization
+                context_tokens = tokenizer.encode(raw_text)
                 context_length = len(context_tokens)
-            
-            terminate_runs_tensor = torch.cuda.LongTensor([terminate_runs])
-            torch.distributed.broadcast(terminate_runs_tensor, mpu.get_model_parallel_src_rank(), group=mpu.get_model_parallel_group())
-            terminate_runs = terminate_runs_tensor[0].item()
-
-            if terminate_runs == 1: # FIXME: 这里在干嘛
-                return
-
-            pad_id = tokenizer.encoder['<pad>']
-            args.eod_token = tokenizer.encoder['<eod>']
-            if context_length < args.seq_length: # padding
-                context_tokens.extend([pad_id] * (args.seq_length - context_length))
-
-            context_tokens_tensor = torch.cuda.LongTensor(context_tokens)
-            context_length_tensor = torch.cuda.LongTensor([context_length])
-
-            torch.distributed.broadcast(context_length_tensor, mpu.get_model_parallel_src_rank(), group=mpu.get_model_parallel_group())
-            torch.distributed.broadcast(context_tokens_tensor, mpu.get_model_parallel_src_rank(), group=mpu.get_model_parallel_group())
-
-            context_length = context_length_tensor[0].item()
-            tokens, attention_mask, position_ids=get_batch(context_tokens_tensor, device, args)
-
-            start_time = time.time()
-
-            counter = 0
-            org_context_length = context_length # 原始的context
-
-            past_key_values = None
-            while counter < (org_context_length + args.out_seq_length):
-                if counter == 0:
-                    logits, past_key_values = model(tokens[:, :context_length], position_ids[:, :context_length], attention_mask[:, :, :context_length, :context_length], past_key_values=past_key_values, use_cache=True)
-                    logits = logits[:, context_length - 1, :]
-                else:
-                    logits, past_key_values = model(tokens[:, context_length - 1 : context_length], position_ids[:, context_length - 1 : context_length], attention_mask[:, :, context_length - 1, :context_length], past_key_values=past_key_values, use_cache=True)
-                    logits = logits[:, 0, :]
-                past_key_values = [x.half() for x in past_key_values]
-                logits = top_k_logits(logits, top_k=args.top_k, top_p=args.top_p)            
-                log_probs = F.softmax(logits/args.temperature, dim=-1)
-                prev = torch.multinomial(log_probs, num_samples=1)
-                tokens[0, context_length] = prev[0] 
-                torch.distributed.broadcast(tokens, mpu.get_model_parallel_src_rank(), group=mpu.get_model_parallel_group())
-                context_length += 1
-                counter += 1
-
-                output_tokens_list = tokens.view(-1).contiguous()
-                decode_tokens = tokenizer.decode(output_tokens_list.tolist())
-                token_end = decode_tokens.find("<eod>") # 生成了eod就截止
-
-
-                if mpu.get_model_parallel_rank() == 0 and (counter % 16 == 0 or token_end != -1): # FIXME: 额%16是什么
-                   os.system('clear')
-                   print("\nTaken time {:.2f}\n".format(time.time() - start_time), flush=True)
-                   print("\nContext:", raw_text, flush=True)
-                   trim_decode_tokens = decode_tokens[len(raw_text):decode_tokens.find("<eod>")]
-                   print("\nCPM:", trim_decode_tokens, flush=True)
-                   return trim_decode_tokens
-                if token_end != -1:
-                   #print(token_end)
-                   break
                 
-            if mpu.get_model_parallel_rank() == 0:
-                os.system('clear')
+                if context_length >= args.seq_length//2: # FIXME: 需要截断
+                    print("\nContext length", context_length, \
+                        "\nPlease give smaller context (half of the sequence length)!")
+                    # continue
+                    pass
+        else: # 第二张卡占位即可
+            # TODO: 两个query一起返回
+            #context_tokens = tokenizer.EncodeAsIds("EMPTY TEXT").tokenization
+            context_tokens = tokenizer.encode("空文本")
+            context_length = len(context_tokens)
+        
+        terminate_runs_tensor = torch.cuda.LongTensor([terminate_runs])
+        torch.distributed.broadcast(terminate_runs_tensor, mpu.get_model_parallel_src_rank(), group=mpu.get_model_parallel_group())
+        terminate_runs = terminate_runs_tensor[0].item()
+
+        if terminate_runs == 1: # FIXME: 这里在干嘛
+            print('terminate')
+            return
+
+        pad_id = tokenizer.encoder['<pad>']
+        args.eod_token = tokenizer.encoder['<eod>']
+        print('context = ', context_tokens)
+        if context_length < args.seq_length: # padding
+            context_tokens.extend([pad_id] * (args.seq_length - context_length))
+        print('padding context = ', context_tokens)
+
+        context_tokens_tensor = torch.cuda.LongTensor(context_tokens)
+        context_length_tensor = torch.cuda.LongTensor([context_length])
+
+        torch.distributed.broadcast(context_length_tensor, mpu.get_model_parallel_src_rank(), group=mpu.get_model_parallel_group())
+        torch.distributed.broadcast(context_tokens_tensor, mpu.get_model_parallel_src_rank(), group=mpu.get_model_parallel_group())
+
+        context_length = context_length_tensor[0].item()
+        tokens, attention_mask, position_ids=get_batch(context_tokens_tensor, device, args)
+
+        start_time = time.time()
+
+        counter = 0
+        org_context_length = context_length # 原始的context
+
+        past_key_values = None
+        print('ready to generate')
+        while counter < (org_context_length + args.out_seq_length):
+            if counter == 0:
+                logits, past_key_values = model(tokens[:, :context_length], position_ids[:, :context_length], attention_mask[:, :, :context_length, :context_length], past_key_values=past_key_values, use_cache=True)
+                logits = logits[:, context_length - 1, :]
+            else:
+                logits, past_key_values = model(tokens[:, context_length - 1 : context_length], position_ids[:, context_length - 1 : context_length], attention_mask[:, :, context_length - 1, :context_length], past_key_values=past_key_values, use_cache=True)
+                logits = logits[:, 0, :]
+            past_key_values = [x.half() for x in past_key_values]
+            logits = top_k_logits(logits, top_k=args.top_k, top_p=args.top_p)            
+            log_probs = F.softmax(logits/args.temperature, dim=-1)
+            prev = torch.multinomial(log_probs, num_samples=1)
+            tokens[0, context_length] = prev[0] 
+            torch.distributed.broadcast(tokens, mpu.get_model_parallel_src_rank(), group=mpu.get_model_parallel_group())
+            context_length += 1
+            counter += 1
+
+            output_tokens_list = tokens.view(-1).contiguous()
+            decode_tokens = tokenizer.decode(output_tokens_list.tolist())
+            print('decode_tokens = ', decode_tokens)
+            token_end = decode_tokens.find("<eod>") # 生成了eod就截止
+
+
+            if mpu.get_model_parallel_rank() == 0 and (counter % 16 == 0 or token_end != -1): # FIXME: 额%16是什么
+                # os.system('clear')
                 print("\nTaken time {:.2f}\n".format(time.time() - start_time), flush=True)
                 print("\nContext:", raw_text, flush=True)
-                output_tokens_list = tokens.view(-1).contiguous()
-                decode_tokens = tokenizer.decode(output_tokens_list.tolist())
                 trim_decode_tokens = decode_tokens[len(raw_text):decode_tokens.find("<eod>")]
                 print("\nCPM:", trim_decode_tokens, flush=True)
+                # return trim_decode_tokens
+            if token_end != -1:
                 #print(token_end)
-            raw_text = None
+                # break
+                pass
+            
+        if mpu.get_model_parallel_rank() == 0: # 得到rank0的输出
+            # os.system('clear')
+            print("\nTaken time {:.2f}\n".format(time.time() - start_time), flush=True)
+            print("\nContext:", raw_text, flush=True)
+            output_tokens_list = tokens.view(-1).contiguous()
+            decode_tokens = tokenizer.decode(output_tokens_list.tolist())
+            trim_decode_tokens = decode_tokens[len(raw_text):decode_tokens.find("<eod>")]
+            print("\nCPM:", trim_decode_tokens, flush=True)
+            return trim_decode_tokens
+            #print(token_end)
+        raw_text = None
 
-            torch.distributed.barrier(group=mpu.get_model_parallel_group())
-            context_count += 1
+        torch.distributed.barrier(group=mpu.get_model_parallel_group())
+        context_count += 1
 
-            if args.input_text:
-                break
+        if args.input_text:
+            # break
+            pass
 
 def prepare_tokenizer(args):
 
@@ -377,6 +387,8 @@ model = setup_model(args)
 args.batch_size = 1
 print('model loaded!')
 
+
+
 app = Flask(__name__)
 
 @app.route('/generate', methods=['POST'])
@@ -385,13 +397,21 @@ def generate_story():
     接收prompt, 返回续写的内容
     '''
     context = json.loads(request.data)['context']
+    print('get context = ',context)
     story = generate_samples(model, tokenizer, args, torch.cuda.current_device(), context)
     code = 200
     result = {'story': story}
     return make_response(jsonify(result), code)
 
-if __name__ == "__main__":
-    app.run("0.0.0.0", port=43391)
+
+# context = "今天是星期天"
+# print('get context = ',context)
+# story = generate_samples(model, tokenizer, args, torch.cuda.current_device(), context)
+# print('story = ', story)
+# FIXME: 第二张卡没有ready
+# if __name__ == "__main__":
+#     if mpu.get_model_parallel_rank() == 0:
+#         app.run("0.0.0.0", port=43391)
 
 
 

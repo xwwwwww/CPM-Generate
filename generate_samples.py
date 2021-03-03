@@ -245,7 +245,7 @@ def generate_samples(model, tokenizer, args, device):
 
 
                 if mpu.get_model_parallel_rank() == 0 and (counter % 16 == 0 or token_end != -1):
-                   os.system('clear')
+                #    os.system('clear')
                    print("\nTaken time {:.2f}\n".format(time.time() - start_time), flush=True)
                    print("\nContext:", raw_text, flush=True)
                    trim_decode_tokens = decode_tokens[len(raw_text):decode_tokens.find("<eod>")]
@@ -255,7 +255,8 @@ def generate_samples(model, tokenizer, args, device):
                    break
                 
             if mpu.get_model_parallel_rank() == 0:
-                os.system('clear')
+                print('final output:')
+                # os.system('clear')
                 print("\nTaken time {:.2f}\n".format(time.time() - start_time), flush=True)
                 print("\nContext:", raw_text, flush=True)
                 output_tokens_list = tokens.view(-1).contiguous()
