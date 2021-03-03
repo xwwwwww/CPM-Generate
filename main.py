@@ -34,6 +34,9 @@ from model import GPT2Model
 from model import DistributedDataParallel as DDP
 from utils import print_rank_0
 
+import json
+from flask import request, make_response, jsonify, Flask
+
 USE_TORCH_DDP = False
 
 def get_masks_and_position_ids(data,
@@ -162,7 +165,7 @@ def top_k_logits(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')):
     return logits
 
 
-def generate_samples(model, tokenizer, args, device):
+def generate_samples(model, tokenizer, args, device, context):
     
     context_count=0
     model.eval()
@@ -172,13 +175,14 @@ def generate_samples(model, tokenizer, args, device):
             terminate_runs=0
 
             if mpu.get_model_parallel_rank() == 0:
-                if args.input_text:
-                    raw_text = open(args.input_text).read().strip()
-                else:
-                    raw_text = input("\nContext prompt (stop to exit) >>> ")
-                    while not raw_text:
-                        print('Prompt should not be empty!')
-                        raw_text = input("\nContext prompt (stop to exit) >>> ")
+                raw_text = context
+                # if args.input_text:
+                #     raw_text = open(args.input_text).read().strip()
+                # else:
+                #     raw_text = input("\nContext prompt (stop to exit) >>> ")
+                #     while not raw_text:
+                #         print('Prompt should not be empty!')
+                #         raw_text = input("\nContext prompt (stop to exit) >>> ")
            
                 if "stop" in raw_text:
                     terminate_runs = 1
@@ -186,8 +190,8 @@ def generate_samples(model, tokenizer, args, device):
                     #context_tokens = tokenizer.EncodeAsIds(raw_text).tokenization
                     context_tokens = tokenizer.encode(raw_text)
                     context_length = len(context_tokens)
-
-                    if context_length >=args.seq_length//2:
+                    
+                    if context_length >= args.seq_length//2: # FIXME: 需要截断
                         print("\nContext length", context_length, \
                             "\nPlease give smaller context (half of the sequence length)!")
                         continue
@@ -200,12 +204,12 @@ def generate_samples(model, tokenizer, args, device):
             torch.distributed.broadcast(terminate_runs_tensor, mpu.get_model_parallel_src_rank(), group=mpu.get_model_parallel_group())
             terminate_runs = terminate_runs_tensor[0].item()
 
-            if terminate_runs == 1:
+            if terminate_runs == 1: # FIXME: 这里在干嘛
                 return
 
             pad_id = tokenizer.encoder['<pad>']
             args.eod_token = tokenizer.encoder['<eod>']
-            if context_length < args.seq_length:
+            if context_length < args.seq_length: # padding
                 context_tokens.extend([pad_id] * (args.seq_length - context_length))
 
             context_tokens_tensor = torch.cuda.LongTensor(context_tokens)
@@ -220,7 +224,7 @@ def generate_samples(model, tokenizer, args, device):
             start_time = time.time()
 
             counter = 0
-            org_context_length = context_length
+            org_context_length = context_length # 原始的context
 
             past_key_values = None
             while counter < (org_context_length + args.out_seq_length):
@@ -241,15 +245,16 @@ def generate_samples(model, tokenizer, args, device):
 
                 output_tokens_list = tokens.view(-1).contiguous()
                 decode_tokens = tokenizer.decode(output_tokens_list.tolist())
-                token_end = decode_tokens.find("<eod>")
+                token_end = decode_tokens.find("<eod>") # 生成了eod就截止
 
 
-                if mpu.get_model_parallel_rank() == 0 and (counter % 16 == 0 or token_end != -1):
+                if mpu.get_model_parallel_rank() == 0 and (counter % 16 == 0 or token_end != -1): # FIXME: 额%16是什么
                    os.system('clear')
                    print("\nTaken time {:.2f}\n".format(time.time() - start_time), flush=True)
                    print("\nContext:", raw_text, flush=True)
                    trim_decode_tokens = decode_tokens[len(raw_text):decode_tokens.find("<eod>")]
                    print("\nCPM:", trim_decode_tokens, flush=True)
+                   return trim_decode_tokens
                 if token_end != -1:
                    #print(token_end)
                    break
@@ -343,42 +348,51 @@ def setup_model(args):
 
     return model
 
-def main():
-    """Main training program."""
 
-    print('Generate Samples')
+  
 
-    # Disable CuDNN.
-    torch.backends.cudnn.enabled = False
+# Disable CuDNN.
+torch.backends.cudnn.enabled = False
 
-    # Timer.
-    timers = Timers()
+# Timer.
+timers = Timers()
 
-    # Arguments.
-    args = get_args()
+# Arguments.
+args = get_args()
 
-    # Pytorch distributed.
-    initialize_distributed(args)
+# Pytorch distributed.
+initialize_distributed(args)
 
-    # Random seeds for reproducability.
-    set_random_seed(args.seed)
+# Random seeds for reproducability.
+set_random_seed(args.seed)
 
-    #get the tokenizer
-    tokenizer = GPT2Tokenizer(os.path.join(args.tokenizer_path, 'vocab.json'), os.path.join(args.tokenizer_path, 'chinese_vocab.model'))
+#get the tokenizer
+tokenizer = GPT2Tokenizer(os.path.join(args.tokenizer_path, 'vocab.json'), os.path.join(args.tokenizer_path, 'chinese_vocab.model'))
 
-    # Model
-    args.parallel_output = False
-    model = setup_model(args)
+# Model
+args.parallel_output = False
+model = setup_model(args)
 
-    #setting default batch size to 1
-    args.batch_size = 1
+#setting default batch size to 1
+args.batch_size = 1
+print('model loaded!')
 
-    #generate samples
-    generate_samples(model, tokenizer, args, torch.cuda.current_device())
-    
+app = Flask(__name__)
+
+@app.route('/generate', methods=['POST'])
+def generate_story():
+    '''
+    接收prompt, 返回续写的内容
+    '''
+    context = json.loads(request.data)['context']
+    story = generate_samples(model, tokenizer, args, torch.cuda.current_device(), context)
+    code = 200
+    result = {'story': story}
+    return make_response(jsonify(result), code)
 
 if __name__ == "__main__":
-    main()
+    app.run("0.0.0.0", port=43391)
+
 
 
 
